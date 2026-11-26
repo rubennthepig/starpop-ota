@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 channel=$PWD
+# Ubuntu's util-linux runtime does not provide the unversioned libblkid
+# linker library required by Reborn's native library tests.
+if ! pkg-config --exists blkid; then
+  sudo apt-get install -y libblkid-dev
+fi
+pkg-config --exists blkid
 tag=${1:?release tag required}
 [[ $tag =~ ^baseline-[0-9]+$ ]]
 [[ ${tag#baseline-} -gt 275 ]]
