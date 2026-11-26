@@ -20,6 +20,7 @@ jobs:
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       needed: ${{ steps.release.outputs.needed }}
+      publish_tag: ${{ steps.release.outputs.publish_tag }}
     steps:
       - id: release
         env:
@@ -29,8 +30,11 @@ jobs:
           tag=$(gh api repos/SchulzCode/Y2Linux/releases/latest --jq .tag_name)
           [[ $tag =~ ^baseline-[0-9]+$ ]]
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          publish_tag="starpop-$tag"
+          if [[ $tag == baseline-283 ]]; then publish_tag="$publish_tag-r1"; fi
+          echo "publish_tag=$publish_tag" >> "$GITHUB_OUTPUT"
           published=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 100 --json tagName --jq '.[].tagName')
-          if grep -Fxq "starpop-$tag" <<< "$published" || [[ ${tag#baseline-} -le 275 ]]; then
+          if grep -Fxq "$publish_tag" <<< "$published" || [[ ${tag#baseline-} -le 275 ]]; then
             echo 'needed=false' >> "$GITHUB_OUTPUT"
           else
             echo 'needed=true' >> "$GITHUB_OUTPUT"
@@ -97,15 +101,16 @@ jobs:
           assert len(k)==64 and k[32:].hex()==json.loads(pathlib.Path('public-key.json').read_text())['public_key_hex']
           PY
           seq=$(python3 -c 'import json; print(json.load(open("candidate/versions.json"))["update_sequence"])')
-          python3 ci/package.py package --image candidate/Y2ROOT.img --bootimg candidate/BOOTIMG.img --recovery candidate/RECOVERY.img --versions candidate/versions.json --output signed --private "$keydir/ota.key" --key-id starpop-ota-v1 --sequence "$seq" --rollback-allowed --notes "Starpop Arcade custom build of $RELEASE_TAG. Source and automated tests passed; physical qualification pending."
+          python3 ci/package.py package --image candidate/Y2ROOT.img --bootimg candidate/BOOTIMG.img --recovery candidate/RECOVERY.img --versions candidate/versions.json --output signed --private "$keydir/ota.key" --key-id starpop-ota-v1 --sequence "$seq" --rollback-allowed --notes "Starpop Arcade custom build of $RELEASE_TAG. Restores full-rate rainbow effects while retaining the upstream calm-rate music waveform and Battery Saver. Automated tests passed; physical qualification pending."
       - name: Publish signed Wi-Fi update
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.check.outputs.tag }}
+          PUBLISH_TAG: ${{ needs.check.outputs.publish_tag }}
         run: |
           set -euo pipefail
           # Prevent a race or accidental replacement of an existing signed release.
-          tag="starpop-$RELEASE_TAG"
+          tag="$PUBLISH_TAG"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then exit 1; fi
           version=$(python3 -c 'import json; print(json.load(open("candidate/versions.json"))["release_version"])')
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Starpop $version" --notes "Unofficial Starpop firmware based on https://github.com/SchulzCode/Y2Linux/releases/tag/$RELEASE_TAG. Automated build and tests passed; device testing pending. Source and third-party licence material attached. Install through the Y2 Software Update menu." --draft signed/* candidate/*-source.tar.gz candidate/third-party/*
