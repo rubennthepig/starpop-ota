@@ -18,7 +18,27 @@ git -C Y2Linux diff --quiet baseline-275 HEAD -- tools/production/layout.py test
 for pair in Y2Linux:linux Y2Reborn:reborn; do
   name=${pair%:*}; patch=${pair#*:}
   git -C "$name" apply --3way --index "$channel/patches/$patch.patch"
-  git -C "$name" diff --cached --check
+  if [[ $name == Y2Reborn ]]; then
+    # The boot animation is raw RGB bytes, not whitespace-sensitive text.
+    # Verify its exact Git blob against the archived patch before excluding
+    # only that binary asset from the text whitespace check.
+    python3 - "$channel/patches/$patch.patch" "$name" <<'PYRGB'
+import pathlib,re,subprocess,sys
+p=pathlib.Path(sys.argv[1]).read_bytes()
+asset='crates/reborn-ui/src/starpop_boot.rgb'
+header=b'diff --git a/'+asset.encode()+b' b/'+asset.encode()+b'\n'
+assert p.count(header)==1, 'expected exactly one archived RGB asset'
+part=p.split(header,1)[1].split(b'\ndiff --git ',1)[0]
+match=re.search(rb'^index [0-9a-f]+\.\.([0-9a-f]{7,64})(?: |\n|$)',part,re.M)
+assert match, 'missing archived RGB blob identity'
+actual=subprocess.check_output(['git','-C',sys.argv[2],'rev-parse',':'+asset]).strip()
+assert actual.startswith(match.group(1)), 'RGB bytes differ from archived asset'
+print('Starpop boot RGB blob verified:',actual.decode())
+PYRGB
+    git -C "$name" diff --cached --check -- . ':(exclude)crates/reborn-ui/src/starpop_boot.rgb'
+  else
+    git -C "$name" diff --cached --check
+  fi
   git -C "$name" commit -m 'Apply tested Starpop customizations'
 done
 python3 - "$channel/public-key.json" <<'PY'
