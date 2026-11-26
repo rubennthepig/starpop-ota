@@ -7,6 +7,9 @@ if ! pkg-config --exists blkid; then
   sudo apt-get install -y libblkid-dev
 fi
 pkg-config --exists blkid
+# PNG and compressed artwork need zlib even when autodetection is disabled.
+sudo apt-get install -y zlib1g-dev
+pkg-config --exists zlib
 tag=${1:?release tag required}
 [[ $tag =~ ^baseline-[0-9]+$ ]]
 [[ ${tag#baseline-} -gt 275 ]]
@@ -78,8 +81,13 @@ tar -xJf "$ffarchive" --strip-components=1 -C "$ffsrc"
 (
   cd "$ffsrc"
   ./configure --prefix="$ffprefix" --libdir="$ffprefix/lib" \
-    --enable-shared --disable-static --disable-autodetect --disable-x86asm \
+    --enable-shared --disable-static --disable-autodetect --disable-x86asm --enable-zlib \
     --disable-doc --disable-debug --disable-ffplay
+  for decoder in PNG MJPEG WEBP FLAC MP3 AAC H264; do
+    grep -qx "#define CONFIG_${decoder}_DECODER 1" config_components.h || {
+      echo "Required host decoder disabled: $decoder"; exit 1;
+    }
+  done
   make -j"$(nproc)" > "$RUNNER_TEMP/host-ffmpeg-build.log" 2>&1 || { tail -n 100 "$RUNNER_TEMP/host-ffmpeg-build.log"; exit 1; }
   make install > "$RUNNER_TEMP/host-ffmpeg-install.log" 2>&1 || { tail -n 100 "$RUNNER_TEMP/host-ffmpeg-install.log"; exit 1; }
 )
@@ -94,6 +102,10 @@ tar -xJf "$ffarchive" --strip-components=1 -C "$ffsrc"
   for lib in libavformat libavcodec libavutil libavfilter libswresample libswscale; do
     test "$(pkg-config --variable=libdir "$lib")" = "$ffprefix/lib"
     echo "$lib $(pkg-config --modversion "$lib")"
+  done
+  # Decode the actual external-art fixtures before the full test suite.
+  for ext in jpg png webp; do
+    ffmpeg -nostdin -v error -xerror -i "Y2Reborn/assets/fixtures/artwork-external.$ext" -frames:v 1 -f null -
   done
   cd Y2Reborn
   cargo fmt --all
