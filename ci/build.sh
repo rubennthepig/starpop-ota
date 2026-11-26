@@ -61,7 +61,45 @@ git -C Y2Linux commit -m 'Preserve Starpop OTA trust and channel'
 # Install the exact toolchain specified by the release, rather than an unpinned nightly.
 toolchain=$(python3 -c 'import tomllib; print(tomllib.load(open("Y2Reborn/rust-toolchain.toml","rb"))["toolchain"]["channel"])')
 rustup toolchain install "$toolchain" --profile minimal --target armv7-unknown-linux-gnueabihf -c rustfmt -c clippy
-(cd Y2Reborn; cargo fmt --all; if ! git diff --quiet; then git diff --check; git commit -am 'Format merged Starpop sources'; fi; cargo test --workspace --locked --offline)
+# Ubuntu 24.04 ships an older FFmpeg ABI. Use the exact source and SHA256
+# pinned by the matching Y2Linux release for the native test suite as well.
+ffversion=$(tr -d '[:space:]' < Y2Reborn/FFMPEG_VERSION)
+[[ $ffversion =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+ffarchive=$(cd Y2Linux; python3 - <<'PYFF'
+from pathlib import Path
+from tools.production.ffmpeg9 import ensure_archive
+print(ensure_archive(Path.cwd()/'.cache/buildroot-dl'))
+PYFF
+)
+ffprefix="$RUNNER_TEMP/starpop-host-ffmpeg"
+ffsrc="$RUNNER_TEMP/starpop-host-ffmpeg-source"
+mkdir -p "$ffsrc" "$ffprefix"
+tar -xJf "$ffarchive" --strip-components=1 -C "$ffsrc"
+(
+  cd "$ffsrc"
+  ./configure --prefix="$ffprefix" --libdir="$ffprefix/lib" \
+    --enable-shared --disable-static --disable-autodetect --disable-x86asm \
+    --disable-doc --disable-debug --disable-ffplay
+  make -j"$(nproc)" > "$RUNNER_TEMP/host-ffmpeg-build.log" 2>&1 || { tail -n 100 "$RUNNER_TEMP/host-ffmpeg-build.log"; exit 1; }
+  make install > "$RUNNER_TEMP/host-ffmpeg-install.log" 2>&1 || { tail -n 100 "$RUNNER_TEMP/host-ffmpeg-install.log"; exit 1; }
+)
+(
+  # These paths are intentionally scoped to host tests only. Buildroot uses
+  # its own ARM libraries, pkg-config wrapper and cross toolchain.
+  export PKG_CONFIG_PATH="$ffprefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  export LD_LIBRARY_PATH="$ffprefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export PATH="$ffprefix/bin:$PATH"
+  ffmpeg -version | head -n 1
+  test "$(pkg-config --variable=libdir libavfilter)" = "$ffprefix/lib"
+  for lib in libavformat libavcodec libavutil libavfilter libswresample libswscale; do
+    test "$(pkg-config --variable=libdir "$lib")" = "$ffprefix/lib"
+    echo "$lib $(pkg-config --modversion "$lib")"
+  done
+  cd Y2Reborn
+  cargo fmt --all
+  if ! git diff --quiet; then git diff --check; git commit -am 'Format merged Starpop sources'; fi
+  cargo test --workspace --locked --offline
+)
 (cd Y2Linux; python3 tools/build/prepare.py; python3 tools/production/build.py --output out/starpop --public)
 mkdir -p "$channel/candidate"
 build=Y2Linux/out/starpop
