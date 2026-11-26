@@ -101,6 +101,89 @@ PYBOOT
 git -C Y2Reborn add app/reborn/tests/boot_handoff_guard.rs
 git -C Y2Reborn diff --cached --check
 git -C Y2Reborn commit -m 'Test Starpop handoff with the same startup ordering and fade invariants'
+# Starpop's rainbow uses its own full-rate animation request. Upstream's
+# ordinary live motion (playing wave) retains the calm rate.
+python3 - <<'PYMOTION'
+from pathlib import Path
+def replace(p,old,new):
+    s=p.read_text()
+    assert s.count(old)==1, f'animation contract changed: {p}: {old}'
+    p.write_text(s.replace(old,new,1))
+base=Path('Y2Reborn/crates/reborn-ui/src')
+p=base/'motion.rs'
+replace(p,'    live: Cell<u64>,','    live: Cell<u64>,\n    fast_live: Cell<u64>,')
+replace(p,'    /// Something drawn in the latest frame is still moving, eased or live.', '''    /// Full-rate opt-in effects also count as ordinary live motion.
+    pub fn mark_fast_live(&self) {
+        self.mark_live();
+        self.fast_live.set(self.frame.get());
+    }
+
+    pub fn fast_live(&self) -> bool {
+        let frame = self.frame.get();
+        frame > 0 && self.fast_live.get() == frame
+    }
+
+    /// Something drawn in the latest frame is still moving, eased or live.''')
+p=base/'ui_state.rs'
+replace(p,'self.film_running || self.in_motion()', 'self.film_running || self.in_motion() || (self.ui_motion && self.motion.fast_live())')
+replace(p,'    /// The playing position for this frame:', '''    /// Starpop gradients need the panel cadence, without an Interactive CPU lease.
+    pub(crate) fn mark_fast_live(&self) {
+        if self.ui_motion {
+            self.motion.mark_fast_live();
+        }
+    }
+
+    /// The playing position for this frame:''')
+p=base/'starpop.rs'
+replace(p,'ui.mark_live();','ui.mark_fast_live();')
+p=base/'motion.rs'
+with p.open('a') as f:
+    f.write("""
+#[cfg(test)]
+mod starpop_frame_rate_tests {
+    use super::*;
+
+    #[test]
+    fn fast_live_is_separate_from_calm_motion_and_expires_after_each_frame() {
+        let m = Motion::default();
+        assert!(!m.fast_live());
+        m.begin_frame();
+        m.mark_live();
+        assert!(m.live());
+        assert!(!m.fast_live());
+        m.begin_frame();
+        m.mark_fast_live();
+        assert!(m.live());
+        assert!(m.fast_live());
+        assert!(!m.settling());
+        m.begin_frame();
+        assert!(!m.live());
+        assert!(!m.fast_live());
+    }
+}
+""")
+PYMOTION
+git -C Y2Reborn add crates/reborn-ui/src/{motion,ui_state,starpop}.rs
+git -C Y2Reborn diff --cached --check
+git -C Y2Reborn commit -m 'Keep Starpop rainbow at full panel cadence without accelerating the wave'
+# An already-installed upstream version requires a higher signed sequence.
+# Later upstream baselines retain their own higher release sequences.
+if [[ $tag == baseline-283 ]]; then
+  python3 - <<'PYREV'
+import json
+from pathlib import Path
+p=Path('Y2Linux/tools/production/release.json')
+v=json.loads(p.read_text())
+assert v['update_sequence']==18800 and v['release_version']=='1.0.0-beta.9.3.40'
+v['update_sequence']=18801
+v['release_version']+='.starpop.1'
+v['build_id']+='-STARPOP-1'
+v['rootfs_version']+='.starpop.1'
+p.write_text(json.dumps(v,indent=2)+'\n')
+PYREV
+  git -C Y2Linux add tools/production/release.json
+  git -C Y2Linux commit -m 'Version Starpop smooth rainbow OTA revision'
+fi
 # Install the exact toolchain specified by the release, rather than an unpinned nightly.
 toolchain=$(python3 -c 'import tomllib; print(tomllib.load(open("Y2Reborn/rust-toolchain.toml","rb"))["toolchain"]["channel"])')
 rustup toolchain install "$toolchain" --profile minimal --target armv7-unknown-linux-gnueabihf -c rustfmt -c clippy
