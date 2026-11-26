@@ -61,6 +61,46 @@ p=pathlib.Path('Y2Linux/tools/update/channel.json'); t=json.loads(p.read_text())
 PY
 git -C Y2Linux add tools/update/trust.json tools/update/channel.json
 git -C Y2Linux commit -m 'Preserve Starpop OTA trust and channel'
+# The custom handoff has a different function name, but must preserve
+# the upstream ordering, first-frame, readiness and fade invariants.
+python3 - <<'PYBOOT'
+from pathlib import Path
+p=Path('Y2Reborn/app/reborn/tests/boot_handoff_guard.rs')
+s=p.read_text()
+old='let cover = at(&source, "reborn_ui::boot_transition(");'
+assert s.count(old)==1, 'upstream boot guard changed; review required'
+s=s.replace(old,'let cover = at(&source, "reborn_ui::starpop_boot_transition(");',1)
+p.write_text(s+'''
+#[test]
+fn starpop_handoff_covers_then_reveals_the_real_ui() {
+    use reborn_graphics::Quad;
+    let ui = vec![Quad::rect(0., 0., 480., 360., 0x123456ff)];
+    let first = reborn_ui::starpop_boot_transition(ui.clone(), 1.);
+    assert_eq!(first[0].color, ui[0].color);
+    assert_eq!(first[1].color, 0x06070aff);
+    assert_eq!((first[1].w, first[1].h), (480., 360.));
+    assert!(first.iter().all(|q| !q.focus_target));
+    assert!(first.iter().skip(2).any(|q| q.x >= 196. && q.x < 284.
+        && q.y >= 106. && q.y < 194. && q.h == 1. && q.color & 255 == 255));
+    let mut previous = 255;
+    for step in (1..=reborn_ui::BOOT_FADE_FRAMES).rev() {
+        let frame = reborn_ui::starpop_boot_transition(
+            ui.clone(), f32::from(step) / f32::from(reborn_ui::BOOT_FADE_FRAMES));
+        assert_eq!(frame[0].color, ui[0].color);
+        let opacity = frame[1].color & 255;
+        assert!(opacity <= previous);
+        previous = opacity;
+    }
+    assert!(previous < 30);
+    let last = reborn_ui::starpop_boot_transition(ui.clone(), 0.);
+    assert_eq!(last.len(), ui.len());
+    assert_eq!(last[0].color, ui[0].color);
+}
+''')
+PYBOOT
+git -C Y2Reborn add app/reborn/tests/boot_handoff_guard.rs
+git -C Y2Reborn diff --cached --check
+git -C Y2Reborn commit -m 'Test Starpop handoff with the same startup ordering and fade invariants'
 # Install the exact toolchain specified by the release, rather than an unpinned nightly.
 toolchain=$(python3 -c 'import tomllib; print(tomllib.load(open("Y2Reborn/rust-toolchain.toml","rb"))["toolchain"]["channel"])')
 rustup toolchain install "$toolchain" --profile minimal --target armv7-unknown-linux-gnueabihf -c rustfmt -c clippy
@@ -112,7 +152,7 @@ tar -xJf "$ffarchive" --strip-components=1 -C "$ffsrc"
   if ! git diff --quiet; then git diff --check; git commit -am 'Format merged Starpop sources'; fi
   cargo test --workspace --locked --offline
 )
-(cd Y2Linux; python3 tools/build/prepare.py; python3 tools/production/build.py --output out/starpop --public)
+(cd Y2Linux; python3 tools/build/prepare.py; python3 tools/production/build.py --output out/starpop --public || { for f in $(find out/starpop -maxdepth 1 -name "*.log" -printf "%T@ %p\\n" | sort -nr | head -n 3 | cut -d" " -f2-); do echo "=== $f ==="; tail -n 80 "$f"; done; exit 1; })
 mkdir -p "$channel/candidate"
 build=Y2Linux/out/starpop
 root="$build/buildroot/images/rootfs.ext4"
