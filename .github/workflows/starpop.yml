@@ -1,0 +1,106 @@
+name: Starpop OTA
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '37 10 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: starpop-ota
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      needed: ${{ steps.release.outputs.needed }}
+    steps:
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(gh api repos/SchulzCode/Y2Linux/releases/latest --jq .tag_name)
+          [[ $tag =~ ^baseline-[0-9]+$ ]]
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          published=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 100 --json tagName --jq '.[].tagName')
+          if grep -Fxq "starpop-$tag" <<< "$published" || [[ ${tag#baseline-} -le 275 ]]; then
+            echo 'needed=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'needed=true' >> "$GITHUB_OUTPUT"
+          fi
+  build:
+    needs: check
+    if: needs.check.outputs.needed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Host build requirements
+        run: |
+          # Only on the disposable GitHub runner, never on your Steam Deck.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          sudo apt-get update
+          sudo apt-get install -y build-essential git bubblewrap python3 python3-pil python3-pyelftools pkg-config rsync cpio unzip bzip2 gzip tar file bc wget gawk perl patch e2fsprogs util-linux android-sdk-libsparse-utils libavformat-dev libavcodec-dev libavutil-dev libavfilter-dev libswresample-dev libswscale-dev libasound2-dev libdbus-1-dev libsqlite3-dev libdrm-dev libgbm-dev libegl1-mesa-dev libgles2-mesa-dev libsodium-dev clang zstd
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
+          bwrap --unshare-all --ro-bind / / --proc /proc --dev /dev -- /bin/true
+          df -h .
+      - name: Merge, test and build public firmware
+        env:
+          RELEASE_TAG: ${{ needs.check.outputs.tag }}
+          REBORN_CARGO: /home/runner/.cargo/bin/cargo
+        run: bash ci/build.sh "$RELEASE_TAG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: candidate
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 2
+  publish:
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate
+          path: candidate
+      - name: Install signing runtime
+        run: sudo apt-get update && sudo apt-get install -y libsodium-dev
+      - name: Sign verified images
+        env:
+          STARPOP_KEY: ${{ secrets.STARPOP_OTA_KEY }}
+          RELEASE_TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          set -euo pipefail
+          umask 077
+          (cd candidate; sha256sum -c SHA256SUMS)
+          keydir=$(mktemp -d "$RUNNER_TEMP/starpop-key.XXXXXX")
+          trap 'rm -rf "$keydir"' EXIT
+          printf '%s' "$STARPOP_KEY" | base64 -d > "$keydir/ota.key"
+          unset STARPOP_KEY
+          python3 - "$keydir/ota.key" <<'PY'
+          import json,pathlib,sys
+          k=pathlib.Path(sys.argv[1]).read_bytes()
+          assert len(k)==64 and k[32:].hex()==json.loads(pathlib.Path('public-key.json').read_text())['public_key_hex']
+          PY
+          seq=$(python3 -c 'import json; print(json.load(open("candidate/versions.json"))["update_sequence"])')
+          python3 ci/package.py package --image candidate/Y2ROOT.img --bootimg candidate/BOOTIMG.img --recovery candidate/RECOVERY.img --versions candidate/versions.json --output signed --private "$keydir/ota.key" --key-id starpop-ota-v1 --sequence "$seq" --rollback-allowed --notes "Starpop Arcade custom build of $RELEASE_TAG. Source and automated tests passed; physical qualification pending."
+      - name: Publish signed Wi-Fi update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Prevent a race or accidental replacement of an existing signed release.
+          tag="starpop-$RELEASE_TAG"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then exit 1; fi
+          version=$(python3 -c 'import json; print(json.load(open("candidate/versions.json"))["release_version"])')
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Starpop $version" --notes "Unofficial Starpop firmware based on https://github.com/SchulzCode/Y2Linux/releases/tag/$RELEASE_TAG. Automated build and tests passed; device testing pending. Source and third-party licence material attached. Install through the Y2 Software Update menu." --draft signed/* candidate/*-source.tar.gz candidate/third-party/*
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
