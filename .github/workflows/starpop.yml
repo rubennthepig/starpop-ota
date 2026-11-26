@@ -1,6 +1,12 @@
 name: Starpop OTA
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'ci/**'
+      - 'patches/**'
+      - '.github/workflows/starpop.yml'
   schedule:
     - cron: '37 10 * * *'
 permissions:
